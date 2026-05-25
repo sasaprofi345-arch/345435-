@@ -9,13 +9,22 @@
           2) HOLD_ANIM_ID  — «держание» фонарика (зацикленная);
         отпускание ПКМ — анимации останавливаются.
       * нажатие ЛКМ — фонарик включается на FLASH_DURATION секунд
-        и светит туда, куда смотрит камера;
-      * есть настраиваемое затухание в начале (FADE_IN_TIME)
-        и в конце (FADE_OUT_TIME) — поставьте 0, чтобы было резко;
+        и светит из детали-«лампочки» модели фонарика
+        в направлении, заданном AIM_MODE;
+      * есть настраиваемое затухание FADE_IN_TIME / FADE_OUT_TIME;
       * после короткого кулдауна можно делать новую вспышку.
 
+    Что нужно от модели фонарика:
+      * модель/Tool с именем FLASHLIGHT_MODEL_NAME находится
+        в персонаже игрока (например, приварена к руке);
+      * внутри модели есть BasePart с именем BULB_PART_NAME —
+        именно из его позиции пойдёт свет.
+      * если такой детали нет — берётся PrimaryPart модели,
+        а если и его нет — первая попавшаяся BasePart.
+      * если самой модели нет — фолбэк на Torso (как раньше).
+
     Размещение: StarterPlayer -> StarterPlayerScripts (LocalScript).
-    Работает на R6-персонаже (использует Torso как точку крепления).
+    Работает на R6-персонаже.
 --------------------------------------------------------------------]]
 
 local Players          = game:GetService("Players")
@@ -29,29 +38,40 @@ local camera      = Workspace.CurrentCamera
 ----------------------------------------------------------------------
 -- Настройки света
 ----------------------------------------------------------------------
-local FLASH_DURATION = 1.5    -- сколько секунд горит вспышка (включая fade-in/out)
+local FLASH_DURATION = 1.5    -- сколько секунд горит вспышка
 local FLASH_COOLDOWN = 0.5    -- задержка после вспышки до следующей
 local FLASH_RANGE    = 120    -- дальность света в studs
 local FLASH_ANGLE    = 60     -- угол конуса SpotLight (полный)
 local FLASH_BRIGHT   = 8      -- максимальная яркость SpotLight (1..10)
 
--- Затухание. Поставьте 0, чтобы вспышка включалась/выключалась мгновенно.
-local FADE_IN_TIME   = 0      -- секунд на разгорание в начале
-local FADE_OUT_TIME  = 0      -- секунд на затухание в конце
+local FADE_IN_TIME   = 0      -- секунд на разгорание (0 = мгновенно)
+local FADE_OUT_TIME  = 0      -- секунд на затухание  (0 = мгновенно)
+
+----------------------------------------------------------------------
+-- Настройки модели фонарика
+----------------------------------------------------------------------
+local FLASHLIGHT_MODEL_NAME = "Flashlight"  -- имя модели/Tool в персонаже
+local BULB_PART_NAME        = "Bulb"        -- имя детали, откуда идёт свет
+
+-- "camera" — свет идёт туда, куда смотрит камера (фонарь "доворачивается"
+--            в сторону взгляда независимо от ориентации модели в руке);
+-- "bulb"   — свет идёт строго по фронтальной оси детали-лампочки
+--            (как настоящий фонарь — куда повернул руку, туда и светит).
+local AIM_MODE = "camera"
 
 ----------------------------------------------------------------------
 -- Настройки анимаций
 ----------------------------------------------------------------------
-local DRAW_ANIM_ID = "rbxassetid://82265148061463"  -- «доставание» (играется 1 раз)
-local HOLD_ANIM_ID = "rbxassetid://0"               -- «держание» (зацикленная)
-                                                    -- ВПИШИ СВОЙ ID СЮДА
+local DRAW_ANIM_ID = "rbxassetid://82265148061463"  -- «доставание» (1 раз)
+local HOLD_ANIM_ID = "rbxassetid://0"               -- «держание» (зацикленная) — впиши свой ID
 
-local DRAW_ANIM_SPEED = 1   -- скорость воспроизведения «доставания»
-local HOLD_ANIM_SPEED = 1   -- скорость воспроизведения «держания»
+local DRAW_ANIM_SPEED = 1
+local HOLD_ANIM_SPEED = 1
 
 ----------------------------------------------------------------------
 -- Состояние
 ----------------------------------------------------------------------
+local character
 local attachment
 local spotLight
 local activeUntil = 0
@@ -59,15 +79,60 @@ local cooldownEnd = 0
 local renderConn
 local fadeToken = 0
 
+local cachedBulb     -- запомненная деталь-лампочка
+local fallbackPart   -- torso, если модели нет
+
 local drawTrack
 local holdTrack
 local drawStoppedConn
 local rmbHeld = false
 
 ----------------------------------------------------------------------
--- Создание света и загрузка анимаций на персонаже
+-- Поиск детали, из которой пойдёт свет
 ----------------------------------------------------------------------
-local function loadAnimations(character)
+local function findBulb()
+    if not character then return nil end
+    local model = character:FindFirstChild(FLASHLIGHT_MODEL_NAME)
+    if not model then return nil end
+
+    if model:IsA("BasePart") then
+        return model
+    end
+
+    local named = model:FindFirstChild(BULB_PART_NAME, true)
+    if named and named:IsA("BasePart") then
+        return named
+    end
+
+    if model:IsA("Model") and model.PrimaryPart then
+        return model.PrimaryPart
+    end
+
+    for _, d in ipairs(model:GetDescendants()) do
+        if d:IsA("BasePart") then
+            return d
+        end
+    end
+    return nil
+end
+
+-- Возвращает деталь, к которой нужно крепить attachment в данный момент.
+-- Использует кеш, чтобы не дёргать FindFirstChild каждый кадр.
+local function resolveHostPart()
+    if cachedBulb and cachedBulb.Parent then
+        return cachedBulb
+    end
+    cachedBulb = findBulb()
+    if cachedBulb then
+        return cachedBulb
+    end
+    return fallbackPart  -- torso
+end
+
+----------------------------------------------------------------------
+-- Анимации
+----------------------------------------------------------------------
+local function loadAnimations()
     local humanoid = character:WaitForChild("Humanoid", 10)
     if not humanoid then return end
     local animator = humanoid:FindFirstChildOfClass("Animator")
@@ -82,7 +147,6 @@ local function loadAnimations(character)
     drawTrack.Looped   = false
     drawTrack.Priority = Enum.AnimationPriority.Action
 
-    -- HOLD грузим только если задан валидный id
     if HOLD_ANIM_ID and HOLD_ANIM_ID ~= "" and HOLD_ANIM_ID ~= "rbxassetid://0" then
         local holdAnim = Instance.new("Animation")
         holdAnim.AnimationId = HOLD_ANIM_ID
@@ -92,56 +156,6 @@ local function loadAnimations(character)
     end
 end
 
-local function setupOnCharacter(character)
-    if attachment then
-        attachment:Destroy()
-        attachment = nil
-        spotLight = nil
-    end
-    if renderConn then
-        renderConn:Disconnect()
-        renderConn = nil
-    end
-    if drawStoppedConn then
-        drawStoppedConn:Disconnect()
-        drawStoppedConn = nil
-    end
-    drawTrack = nil
-    holdTrack = nil
-    rmbHeld   = false
-
-    local torso = character:WaitForChild("Torso", 10)
-    if not torso then return end
-
-    attachment = Instance.new("Attachment")
-    attachment.Name   = "FlashFlashlightAttach"
-    attachment.Parent = torso
-
-    spotLight = Instance.new("SpotLight")
-    spotLight.Name       = "FlashFlashlight"
-    spotLight.Range      = FLASH_RANGE
-    spotLight.Angle      = FLASH_ANGLE
-    spotLight.Brightness = 0
-    spotLight.Shadows    = true
-    spotLight.Enabled    = false
-    spotLight.Face       = Enum.NormalId.Front
-    spotLight.Color      = Color3.fromRGB(255, 245, 210)
-    spotLight.Parent     = attachment
-
-    renderConn = RunService.RenderStepped:Connect(function()
-        if not attachment.Parent then return end
-        attachment.WorldCFrame = CFrame.new(
-            attachment.WorldPosition,
-            attachment.WorldPosition + camera.CFrame.LookVector
-        )
-    end)
-
-    loadAnimations(character)
-end
-
-----------------------------------------------------------------------
--- Анимации: запуск/остановка по ПКМ
-----------------------------------------------------------------------
 local function startHold()
     if rmbHeld then return end
     if not drawTrack then return end
@@ -177,6 +191,73 @@ local function stopHold()
     end
     if drawTrack then drawTrack:Stop(0.15) end
     if holdTrack then holdTrack:Stop(0.15) end
+end
+
+----------------------------------------------------------------------
+-- Установка света на персонажа
+----------------------------------------------------------------------
+local function setupOnCharacter(char)
+    character = char
+    cachedBulb = nil
+    fallbackPart = nil
+
+    if attachment then
+        attachment:Destroy()
+        attachment = nil
+        spotLight = nil
+    end
+    if renderConn then
+        renderConn:Disconnect()
+        renderConn = nil
+    end
+    if drawStoppedConn then
+        drawStoppedConn:Disconnect()
+        drawStoppedConn = nil
+    end
+    drawTrack = nil
+    holdTrack = nil
+    rmbHeld   = false
+
+    fallbackPart = character:WaitForChild("Torso", 10)
+    if not fallbackPart then return end
+
+    attachment = Instance.new("Attachment")
+    attachment.Name   = "FlashFlashlightAttach"
+    attachment.Parent = fallbackPart
+
+    spotLight = Instance.new("SpotLight")
+    spotLight.Name       = "FlashFlashlight"
+    spotLight.Range      = FLASH_RANGE
+    spotLight.Angle      = FLASH_ANGLE
+    spotLight.Brightness = 0
+    spotLight.Shadows    = true
+    spotLight.Enabled    = false
+    spotLight.Face       = Enum.NormalId.Front
+    spotLight.Color      = Color3.fromRGB(255, 245, 210)
+    spotLight.Parent     = attachment
+
+    renderConn = RunService.RenderStepped:Connect(function()
+        if not attachment then return end
+
+        local host = resolveHostPart()
+        if not host then return end
+        if attachment.Parent ~= host then
+            attachment.Parent = host
+        end
+
+        if AIM_MODE == "bulb" then
+            -- Attachment в локальных координатах = identity, тогда WorldCFrame
+            -- совпадает с CFrame детали и Front смотрит вперёд по фронту лампочки.
+            attachment.CFrame = CFrame.new()
+        else
+            -- "camera": разворачиваем attachment так, чтобы его Front
+            -- смотрел в направлении камеры (свет туда, куда смотрит игрок).
+            local pos = host.Position
+            attachment.WorldCFrame = CFrame.new(pos, pos + camera.CFrame.LookVector)
+        end
+    end)
+
+    loadAnimations()
 end
 
 ----------------------------------------------------------------------
@@ -252,8 +333,8 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
-local function onCharacterAdded(character)
-    setupOnCharacter(character)
+local function onCharacterAdded(char)
+    setupOnCharacter(char)
 end
 
 if localPlayer.Character then
