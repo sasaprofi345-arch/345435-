@@ -4,8 +4,11 @@
     Клиентский скрипт «вспышка фонариком» для R6.
 
     Логика:
-      * игрок целится камерой в нужное место;
-      * нажимает ЛКМ — фонарик включается на FLASH_DURATION секунд
+      * пока игрок зажимает ПКМ — проигрываются анимации:
+          1) DRAW_ANIM_ID  — «доставание» фонарика (1 раз);
+          2) HOLD_ANIM_ID  — «держание» фонарика (зацикленная);
+        отпускание ПКМ — анимации останавливаются.
+      * нажатие ЛКМ — фонарик включается на FLASH_DURATION секунд
         и светит туда, куда смотрит камера;
       * есть настраиваемое затухание в начале (FADE_IN_TIME)
         и в конце (FADE_OUT_TIME) — поставьте 0, чтобы было резко;
@@ -24,7 +27,7 @@ local localPlayer = Players.LocalPlayer
 local camera      = Workspace.CurrentCamera
 
 ----------------------------------------------------------------------
--- Настройки
+-- Настройки света
 ----------------------------------------------------------------------
 local FLASH_DURATION = 1.5    -- сколько секунд горит вспышка (включая fade-in/out)
 local FLASH_COOLDOWN = 0.5    -- задержка после вспышки до следующей
@@ -37,6 +40,16 @@ local FADE_IN_TIME   = 0      -- секунд на разгорание в на�
 local FADE_OUT_TIME  = 0      -- секунд на затухание в конце
 
 ----------------------------------------------------------------------
+-- Настройки анимаций
+----------------------------------------------------------------------
+local DRAW_ANIM_ID = "rbxassetid://82265148061463"  -- «доставание» (играется 1 раз)
+local HOLD_ANIM_ID = "rbxassetid://0"               -- «держание» (зацикленная)
+                                                    -- ВПИШИ СВОЙ ID СЮДА
+
+local DRAW_ANIM_SPEED = 1   -- скорость воспроизведения «доставания»
+local HOLD_ANIM_SPEED = 1   -- скорость воспроизведения «держания»
+
+----------------------------------------------------------------------
 -- Состояние
 ----------------------------------------------------------------------
 local attachment
@@ -44,12 +57,41 @@ local spotLight
 local activeUntil = 0
 local cooldownEnd = 0
 local renderConn
-local fadeToken = 0           -- инкрементируется при каждой вспышке, чтобы
-                              -- старый fade-цикл не перезаписал новый
+local fadeToken = 0
+
+local drawTrack
+local holdTrack
+local drawStoppedConn
+local rmbHeld = false
 
 ----------------------------------------------------------------------
--- Создание света на персонаже
+-- Создание света и загрузка анимаций на персонаже
 ----------------------------------------------------------------------
+local function loadAnimations(character)
+    local humanoid = character:WaitForChild("Humanoid", 10)
+    if not humanoid then return end
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
+
+    local drawAnim = Instance.new("Animation")
+    drawAnim.AnimationId = DRAW_ANIM_ID
+    drawTrack = animator:LoadAnimation(drawAnim)
+    drawTrack.Looped   = false
+    drawTrack.Priority = Enum.AnimationPriority.Action
+
+    -- HOLD грузим только если задан валидный id
+    if HOLD_ANIM_ID and HOLD_ANIM_ID ~= "" and HOLD_ANIM_ID ~= "rbxassetid://0" then
+        local holdAnim = Instance.new("Animation")
+        holdAnim.AnimationId = HOLD_ANIM_ID
+        holdTrack = animator:LoadAnimation(holdAnim)
+        holdTrack.Looped   = true
+        holdTrack.Priority = Enum.AnimationPriority.Action
+    end
+end
+
 local function setupOnCharacter(character)
     if attachment then
         attachment:Destroy()
@@ -60,8 +102,14 @@ local function setupOnCharacter(character)
         renderConn:Disconnect()
         renderConn = nil
     end
+    if drawStoppedConn then
+        drawStoppedConn:Disconnect()
+        drawStoppedConn = nil
+    end
+    drawTrack = nil
+    holdTrack = nil
+    rmbHeld   = false
 
-    -- В R6 точка крепления — Torso
     local torso = character:WaitForChild("Torso", 10)
     if not torso then return end
 
@@ -80,8 +128,6 @@ local function setupOnCharacter(character)
     spotLight.Color      = Color3.fromRGB(255, 245, 210)
     spotLight.Parent     = attachment
 
-    -- Каждый кадр поворачиваем attachment туда же, куда смотрит камера —
-    -- получается «свет туда, куда направлен взгляд игрока».
     renderConn = RunService.RenderStepped:Connect(function()
         if not attachment.Parent then return end
         attachment.WorldCFrame = CFrame.new(
@@ -89,13 +135,52 @@ local function setupOnCharacter(character)
             attachment.WorldPosition + camera.CFrame.LookVector
         )
     end)
+
+    loadAnimations(character)
 end
 
 ----------------------------------------------------------------------
--- Линейное изменение Brightness от текущего значения к target за duration.
--- При duration <= 0 ставит target мгновенно.
--- token — снимок fadeToken на момент запуска; если он успел измениться,
--- значит запустилась новая вспышка и старый fade нужно прервать.
+-- Анимации: запуск/остановка по ПКМ
+----------------------------------------------------------------------
+local function startHold()
+    if rmbHeld then return end
+    if not drawTrack then return end
+    rmbHeld = true
+
+    if holdTrack then holdTrack:Stop(0.1) end
+
+    if drawStoppedConn then
+        drawStoppedConn:Disconnect()
+        drawStoppedConn = nil
+    end
+
+    drawTrack:Stop(0)
+    drawTrack:Play(0.1, 1, DRAW_ANIM_SPEED)
+
+    drawStoppedConn = drawTrack.Stopped:Connect(function()
+        if drawStoppedConn then
+            drawStoppedConn:Disconnect()
+            drawStoppedConn = nil
+        end
+        if rmbHeld and holdTrack then
+            holdTrack:Play(0.1, 1, HOLD_ANIM_SPEED)
+        end
+    end)
+end
+
+local function stopHold()
+    if not rmbHeld then return end
+    rmbHeld = false
+    if drawStoppedConn then
+        drawStoppedConn:Disconnect()
+        drawStoppedConn = nil
+    end
+    if drawTrack then drawTrack:Stop(0.15) end
+    if holdTrack then holdTrack:Stop(0.15) end
+end
+
+----------------------------------------------------------------------
+-- Сама вспышка (ЛКМ)
 ----------------------------------------------------------------------
 local function fadeBrightness(target, duration, token)
     if not spotLight then return end
@@ -120,9 +205,6 @@ local function fadeBrightness(target, duration, token)
     end)
 end
 
-----------------------------------------------------------------------
--- Сама вспышка
-----------------------------------------------------------------------
 local function doFlash()
     local now = tick()
     if now < cooldownEnd then return end
@@ -135,10 +217,8 @@ local function doFlash()
     activeUntil = now + FLASH_DURATION
     spotLight.Enabled = true
 
-    -- Fade-in (или мгновенно, если FADE_IN_TIME == 0)
     fadeBrightness(FLASH_BRIGHT, FADE_IN_TIME, myToken)
 
-    -- Fade-out стартует так, чтобы закончиться ровно в конце FLASH_DURATION
     local fadeOutStart = math.max(0, FLASH_DURATION - FADE_OUT_TIME)
     task.delay(fadeOutStart, function()
         if myToken ~= fadeToken then return end
@@ -161,6 +241,14 @@ UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         doFlash()
+    elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+        startHold()
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        stopHold()
     end
 end)
 
