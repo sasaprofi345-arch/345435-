@@ -70,8 +70,15 @@ ServerScriptService
 ```
 StarterPlayer
 └── StarterPlayerScripts
-    └── Flashlight     (LocalScript) -- сюда положите содержимое Flashlight.client.lua
+    ├── Flashlight          (LocalScript) -- содержимое Flashlight.client.lua
+    └── SurvivorMovement    (LocalScript) -- содержимое SurvivorMovement.client.lua
 ```
+
+> `SurvivorMovement` — DBD-подобная **плавность** для R6:
+> тело "вязко" догоняет камеру при поворотах, тонкий lean при
+> стрейфе и вращении мыши, мягкий head-bob, быстрый разворот (Q),
+> look-back на удержание (LeftAlt). Скорость персонажа и стамина
+> НЕ затрагиваются. Все параметры — в верхнем блоке `CONFIG`.
 
 ## 5. Управление
 
