@@ -70,8 +70,14 @@ ServerScriptService
 ```
 StarterPlayer
 └── StarterPlayerScripts
-    └── Flashlight     (LocalScript) -- сюда положите содержимое Flashlight.client.lua
+    ├── Flashlight          (LocalScript) -- содержимое Flashlight.client.lua
+    └── SurvivorMovement    (LocalScript) -- содержимое SurvivorMovement.client.lua
 ```
+
+> `SurvivorMovement` — DBD-подобный мувмент для R6: спринт со
+> стаминой (Shift), присед (C), быстрый разворот (Q), look-back
+> на удержание (LeftAlt) и контекстный vault (Space у низких
+> препятствий). Все параметры — в верхнем блоке `CONFIG`.
 
 ## 5. Управление
 
